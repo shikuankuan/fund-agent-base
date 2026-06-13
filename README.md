@@ -87,14 +87,14 @@ fund-agent-base/
 cd backend
 
 # 创建虚拟环境
-python -m venv venv
-source venv/bin/activate
+conda create -n fund-agent python=3.11
+conda activate fund-agent
 
 # 安装依赖
 pip install -r requirements.txt
 
 # 配置环境变量
-cp .env.example .env
+  .env 内容参考 .env.example
 # 编辑 .env，填入 API Key 和模型配置
 
 # 启动服务
