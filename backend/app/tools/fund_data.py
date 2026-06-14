@@ -4,7 +4,7 @@
 FUND_DATABASE = {
     "000001": {
         "code": "000001",
-        "name": "宽宽成长混合",
+        "name": "华夏成长混合",
         "type": "混合型",
         "manager": "王明",
         "company": "华夏基金",

@@ -34,17 +34,14 @@ async def chat(request: ChatRequest):
 
         initial_state = {
             "messages": [HumanMessage(content=request.message)],
-            "user_intent": None,
-            "current_fund": None,
-            "analysis_result": None,
-            "compliance_result": None,
-            "final_response": None,
         }
 
         print(f"[LangGraph] 用户消息: {request.message}")
+        print(f"[LangGraph] 会话 ID: {request.session_id}")
 
+        config = {"configurable": {"thread_id": request.session_id}}
         # 2. 执行状态图
-        result = fund_agent_graph.invoke(initial_state)
+        result = fund_agent_graph.invoke(initial_state, config=config)
 
         print(f"[LangGraph] 执行完成")
 
@@ -70,7 +67,7 @@ async def chat(request: ChatRequest):
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """流式聊天接口（真正的 SSE 流式输出）
+    """流式聊天接口（SSE + Checkpointer 持久化）
 
     使用 LangGraph 的 astream_events() 实现真正的流式输出。
     监听 on_chat_model_stream 事件，逐 token 返回。
@@ -94,20 +91,18 @@ async def chat_stream(request: ChatRequest):
 
             initial_state = {
                 "messages": [HumanMessage(content=request.message)],
-                "user_intent": None,
-                "current_fund": None,
-                "analysis_result": None,
-                "compliance_result": None,
-                "final_response": None,
             }
 
+            print(f"\n{'='*60}")
             print(f"[LangGraph Stream] 用户消息: {request.message}")
-            print(f"[LangGraph Stream] 开始流式输出...")
+            print(f"[LangGraph Stream] 会话 ID: {request.session_id}")
 
             # 2. 使用 astream_events() 监听事件
             # async for：异步迭代（每次生成一个事件）
+            # 传入 config（含 thread_id），确保 Checkpointer 正确关联会话
+            config = {"configurable": {"thread_id": request.session_id}}
             async for event in fund_agent_graph.astream_events(
-                initial_state, version="v2"  # 使用 v2 版本（更详细）
+                initial_state, config=config, version="v2"  # 使用 v2 版本（更详细）
             ):
                 # 3. 只处理 LLM 生成 token 的事件
                 if event["event"] == "on_chat_model_stream":
@@ -184,3 +179,109 @@ async def get_graph_image():
     image_bytes = graph.draw_mermaid_png()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     return {"image": f"data:image/png;base64,{image_b64}"}
+
+
+# ========== 会话管理 ==========
+
+import sqlite3
+from datetime import datetime
+
+
+@router.get("/sessions")
+async def list_sessions():
+    """列出所有活跃会话及其最后活动时间"""
+    try:
+        conn = sqlite3.connect(".langgraph.db")
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT thread_id, 
+                   MAX(json_extract(metadata, '$.step')) as last_step,
+                   COUNT(*) as checkpoint_count
+            FROM checkpoints 
+            GROUP BY thread_id
+            ORDER BY last_step DESC
+        """)
+
+        sessions = []
+        for row in cursor.fetchall():
+            thread_id, last_step, count = row
+            sessions.append(
+                {
+                    "session_id": thread_id,
+                    "last_step": last_step,
+                    "checkpoint_count": count,
+                }
+            )
+
+        conn.close()
+        return {"total_sessions": len(sessions), "sessions": sessions}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除指定会话的所有检查点"""
+    try:
+        conn = sqlite3.connect(".langgraph.db")
+        cursor = conn.cursor()
+
+        cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (session_id,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "checkpoints_removed": deleted,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sessions/cleanup")
+async def cleanup_sessions(max_sessions: int = 50):
+    """清理旧会话，保留最近的 N 个"""
+    try:
+        conn = sqlite3.connect(".langgraph.db")
+        cursor = conn.cursor()
+
+        # 找出需要删除的旧会话（按最后检查点排序）
+        cursor.execute(
+            """
+            SELECT thread_id
+            FROM checkpoints 
+            GROUP BY thread_id
+            ORDER BY MAX(checkpoint_id) DESC
+            LIMIT -1 OFFSET ?
+        """,
+            (max_sessions,),
+        )
+
+        to_delete = [row[0] for row in cursor.fetchall()]
+
+        if not to_delete:
+            conn.close()
+            return {"deleted_sessions": 0, "message": "无需清理"}
+
+        placeholders = ",".join("?" * len(to_delete))
+        cursor.execute(
+            f"DELETE FROM checkpoints WHERE thread_id IN ({placeholders})",
+            to_delete,
+        )
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        return {
+            "deleted_sessions": len(to_delete),
+            "checkpoints_removed": deleted_count,
+            "sessions": to_delete,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

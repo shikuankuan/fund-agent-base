@@ -33,6 +33,8 @@ class AgentState(TypedDict):
     # 当前基金代码（例如："005827"）
     current_fund: Optional[str]
 
+    fund_info: Optional[Any]
+
     # 分析结果（字典类型）
     # 例如：{"return_1y": 0.15, "risk_level": "中高风险"}
     analysis_result: Optional[Dict[str, Any]]
@@ -43,3 +45,21 @@ class AgentState(TypedDict):
 
     # 最终回复（字符串）
     final_response: Optional[str]
+
+    # ========== 记忆字段 ==========
+
+    # 上一个讨论的基金（用于"和它比呢？"类追问）
+    previous_fund: Optional[str]
+
+    selected_tools: Optional[List[str]]
+
+    # 用户风险等级（R1-R5）
+    # 从对话中提取，例如用户说"我是 R3 投资者"
+    user_risk_level: Optional[str]
+
+    # 最近讨论的基金经理（用于"他管的另一只"）
+    last_manager: Optional[str]
+
+    previous_fund_info: Optional[Any]
+
+    previous_analysis: Optional[dict]

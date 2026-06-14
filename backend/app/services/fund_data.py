@@ -17,7 +17,7 @@ from app.models import (
 FUND_DATABASE: dict = {
     "000001": {
         "code": "000001",
-        "name": "华夏成长混合",
+        "name": "宽宽成长混合",
         "type": "混合型",
         "risk_level": "中风险",
         "founded_date": date(2018, 9, 5),
@@ -29,7 +29,7 @@ FUND_DATABASE: dict = {
             "historical_returns": {"1y": 15.2, "3y": 45.8, "5y": 82.3},
             "investment_style": "成长风格，注重选股",
         },
-        "company": "华夏基金",
+        "company": "宽宽基金",
         "nav": {
             "nav_date": date.today(),
             "nav": 1.2345,

@@ -3,7 +3,7 @@
 from typing import Literal
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from app.config import settings
 from app.agent.state import AgentState
 
@@ -79,9 +79,20 @@ def intent_recognizer(state: AgentState) -> dict:
 
     print(f"[意图识别] 识别结果: {intent}")
 
+    # 新增：提取用户风险等级
+    user_message = state["messages"][-1].content
+    import re
+
+    risk_match = re.search(r"\bR([1-5])\b", user_message)
+
+    update = {"user_intent": intent}
+
+    if risk_match:
+        update["user_risk_level"] = f"R{risk_match.group(1)}"
+        print(f"[意图识别] 检测到用户风险等级: {update['user_risk_level']}")
     # 返回需要更新的状态字段
     # 注意：只返回要更新的字段，不是整个状态
-    return {"user_intent": intent}
+    return update
 
 
 def tool_selector(state: AgentState) -> dict:
@@ -128,45 +139,60 @@ def tool_selector(state: AgentState) -> dict:
 
 # ========== 节点 3: 数据获取 ==========
 def data_fetcher(state: AgentState) -> dict:
-    """调用数据工具获取信息
+    """调用数据工具获取基金信息
 
-    根据工具选择结果，调用相应的工具获取数据。
+    优先级：
+    1. 用户消息中提取基金代码
+    2. 提取不到 → 使用 state["current_fund"]（上一轮或 Checkpointer 恢复的）
 
-    Args:
-    state: 当前状态（包含 messages）
-
-    Returns:
-    dict: 需要更新的状态字段（这里是 current_fund, fund_info）
+    换基金时 → 旧基金保存到 previous_fund（供"和它比呢"使用）
     """
     from app.services.fund_data import FundDataService
 
-    # 获取服务实例
     service = FundDataService()
 
-    # 提取基金代码（从用户消息中）
     user_message = state["messages"][-1].content
-
-    # 简单的基金代码提取（实际项目中用正则或 NER）
     import re
 
-    fund_codes = re.findall(r"\b\d{6}\b", user_message)
+    fund_codes = re.findall(r"(?<!\d)\d{6}(?!\d)", user_message)
+
+    old_current = state.get("current_fund")
 
     print(f"[数据获取] 用户消息: {user_message}")
-    print(f"[数据获取] 提取的基金代码: {fund_codes}")
+    print(f"[数据获取] 消息提取基金: {fund_codes}")
+    print(f"[数据获取] 上下文基金: {old_current}")
 
-    # 如果找到基金代码
+    # ① 优先用消息提取的代码
+    fund_code = None
     if fund_codes:
         fund_code = fund_codes[0]
-        fund_info = service.get_fund_info(fund_code)
+        print(f"[数据获取] 使用消息中的: {fund_code}")
+    # ② 消息中没有 → 用上下文中的 ← 这行之前没有！
+    elif old_current:
+        fund_code = old_current
+        print(f"[数据获取] 使用上下文中的: {fund_code}")
 
-        print(f"[数据获取] 基金代码: {fund_code}")
-        print(f"[数据获取] 基金名称: {fund_info.name if fund_info else '未知'}")
+    if not fund_code:
+        print("[数据获取] 消息和上下文中都没有基金代码")
+        return {"current_fund": None, "fund_info": None}
 
-        return {"current_fund": fund_code, "fund_info": fund_info}
+    # 获取基金信息（返回 Pydantic FundInfo 对象）
+    fund_info = service.get_fund_info(fund_code)
+    update = {
+        "current_fund": fund_code,
+        "fund_info": fund_info,
+    }
 
-    # 没找到基金代码
-    print("[数据获取] 未找到基金代码")
-    return {"current_fund": None, "fund_info": None}
+    # ③ 如果换了基金 → 旧值保存到 previous_fund
+    if old_current and old_current != fund_code:
+        update["previous_fund"] = old_current
+        update["previous_fund_info"] = state.get("fund_info")
+        update["previous_analysis"] = state.get("analysis_result")
+        print(f"[数据获取] previous_fund ← {old_current}")
+        print(f"[数据获取] previous_fund_info {update['previous_fund_info']}")
+
+    print(f"[数据获取] ✓ {fund_code} → {fund_info.name if fund_info else '未找到'}")
+    return update
 
 
 # ========== 节点 4: 分析计算 ==========
@@ -293,10 +319,51 @@ def response_generator(state: AgentState) -> dict:
     # 从状态中获取所有相关信息
     intent = state.get("user_intent", "query")
     fund_info = state.get("fund_info")
+    previous_fund_info = state.get("previous_fund_info")
     analysis_result = state.get("analysis_result")
     compliance_result = state.get("compliance_result")
     current_fund = state.get("current_fund")
+    previous_fund = state.get("previous_fund")
 
+    # ✅ 统一提取函数：兼容 Pydantic 对象(dict 序列化后) 和原始 dict
+    def _extract(fi):
+        if fi is None:
+            return "未知", "未知", ""
+        # Pydantic 对象 → 先转 dict
+        if hasattr(fi, "model_dump"):
+            d = fi.model_dump()
+        elif hasattr(fi, "dict"):
+            d = fi.dict()
+        else:
+            d = fi  # 已经是 dict
+        if not isinstance(d, dict):
+            return "未知", "未知", ""
+        name = d.get("name", "未知")
+        company = d.get("company", "未知")
+        mgr = d.get("manager", {})
+        if isinstance(mgr, dict):
+            manager = mgr.get("name", "")
+        elif hasattr(mgr, "name"):
+            manager = mgr.name or ""
+        else:
+            manager = ""
+        return name, company, manager
+
+    fund_name, fund_company, fund_manager = _extract(fund_info)
+    print(
+        f"[生成回复] fund={fund_name} | company={fund_company} | manager={fund_manager}"
+    )
+    # 构建上一只基金的上下文
+    prev_fund_context = ""
+    if previous_fund:
+        prev_name, prev_company, prev_manager = _extract(previous_fund_info)
+        prev_fund_context = f"""
+            ## 对比基金信息
+            代码: {previous_fund}
+            名称: {prev_name}
+            公司: {prev_company}
+            基金经理: {prev_manager}
+            """
     # 构建上下文（把所有信息整合到一起）
     context = f"""
 ## 用户意图
@@ -304,8 +371,10 @@ def response_generator(state: AgentState) -> dict:
 
 ## 基金信息
 基金代码: {current_fund if current_fund else '未知'}
-基金名称: {fund_info.name if fund_info else '未知'}
-基金公司: {fund_info.company if fund_info else '未知'}
+当前基金名称: {fund_name}
+基金公司: {fund_company}
+基金经理: {fund_manager}
+{prev_fund_context}
 
 ## 分析结果
 {analysis_result if analysis_result else '无'}
@@ -333,16 +402,16 @@ def response_generator(state: AgentState) -> dict:
 5. 回复长度控制在 200-400 字
 """,
             ),
-            ("user", "{user_message}"),
+            MessagesPlaceholder(variable_name="history"),
         ]
     )
 
     # 获取用户最新消息
-    user_message = state["messages"][-1].content
+    history = state["messages"][-10:]
 
     # 生成回复
     chain = prompt | llm
-    result = chain.invoke({"context": context, "user_message": user_message})
+    result = chain.invoke({"context": context, "history": history})
 
     final_response = result.content
 
