@@ -5,9 +5,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, AsyncGenerator
 import json
-import asyncio
 
-from app.agent.graph import fund_agent_graph
+from app.agent.graph import get_graph
+from langgraph.errors import GraphInterrupt
 
 # ========== 请求/响应模型 ==========
 
@@ -38,24 +38,45 @@ async def chat(request: ChatRequest):
 
         print(f"[LangGraph] 用户消息: {request.message}")
         print(f"[LangGraph] 会话 ID: {request.session_id}")
-
-        config = {"configurable": {"thread_id": request.session_id}}
+        thread_id = request.session_id
+        config = {"configurable": {"thread_id": thread_id}}
         # 2. 执行状态图
-        result = fund_agent_graph.invoke(initial_state, config=config)
+        try:
 
-        print(f"[LangGraph] 执行完成")
+            result = await get_graph().ainvoke(initial_state, config=config)
+            # 检查图是否被中断
+            current = await get_graph().aget_state(config)
+            pending = current.next  # 空列表 = 完成，非空 = 中断
+            print(f"[LangGraph] 执行完成")
 
-        # 3. 提取最终回复
-        final_response = result.get("final_response")
-        if not final_response:
-            messages = result.get("messages", [])
-            if messages:
-                final_response = messages[-1].content
+            if pending:
+                # 图停在 compliance_checker 之后，等待审批
+                compliance = current.values.get("compliance_result", {})
+                return {
+                    "reply": f"⏸️ 合规审查 [{compliance.get('grade')}]，等待审批",
+                    "session_id": thread_id,
+                    "status": "interrupted",
+                    "compliance_result": compliance,
+                    "pending_nodes": pending,
+                }
 
-        print(f"[LangGraph] 最终回复: {final_response[:100]}...")
+            # 图正常跑完了
+            return {
+                "reply": result.get("final_response", "你好，有什么可以帮你的？"),
+                "session_id": thread_id,
+                "status": "completed",
+            }
+        except GraphInterrupt as gi:
+            # 被中断了！当前状态已保存在 Checkpointer 里
+            current_state = await get_graph().aget_state(config)
+            compliance = current_state.values.get("compliance_result", {})
 
-        # 4. 返回响应
-        return {"reply": final_response, "session_id": request.session_id}
+            return {
+                "reply": f"⏸️ 合规审查完成，等待人工审批。\n审查结果：{compliance}",
+                "session_id": request.session_id,
+                "status": "interrupted",
+                "compliance_result": compliance,  # ← 前端用它渲染审批界面
+            }
 
     except Exception as e:
         print(f"[LangGraph] 错误: {str(e)}")
@@ -67,10 +88,11 @@ async def chat(request: ChatRequest):
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """流式聊天接口（SSE + Checkpointer 持久化）
+    """流式聊天接口（SSE + Checkpointer 持久化 + 合规中断）
 
     使用 LangGraph 的 astream_events() 实现真正的流式输出。
     监听 on_chat_model_stream 事件，逐 token 返回。
+    合规审查触发时，返回 interrupted 事件给前端弹出审批面板。
 
     Args:
         request: 聊天请求
@@ -80,11 +102,27 @@ async def chat_stream(request: ChatRequest):
     """
 
     async def generate_stream() -> AsyncGenerator[str, None]:
-        """生成 SSE 事件流（真正的流式输出）
+        """生成 SSE 事件流
 
         Yields:
             SSE 格式的事件（data: {...}\n\n）
+            事件类型：
+              - {"event": "node_start", "node": "...", "label": "..."}  — 节点开始
+              - {"event": "node_end", "node": "...", "label": "..."}  — 节点完成
+              - {"token": "..."}          — 逐字 token
+              - {"status": "interrupted", "compliance_result": {...}}  — 合规中断
+              - {"error": "..."}          — 错误
+              - [DONE]                    — 流结束
         """
+        # 节点名称 → 中文标签映射
+        NODE_LABELS = {
+            "intent_recognizer": "意图识别",
+            "tool_selector": "工具选择",
+            "data_fetcher": "数据获取",
+            "analyzer": "分析计算",
+            "compliance_checker": "合规审查",
+            "response_generator": "生成回复",
+        }
         try:
             # 1. 构建初始状态
             from langchain_core.messages import HumanMessage
@@ -93,47 +131,79 @@ async def chat_stream(request: ChatRequest):
                 "messages": [HumanMessage(content=request.message)],
             }
 
+            thread_id = request.session_id
+            config = {"configurable": {"thread_id": thread_id}}
+
             print(f"\n{'='*60}")
             print(f"[LangGraph Stream] 用户消息: {request.message}")
-            print(f"[LangGraph Stream] 会话 ID: {request.session_id}")
+            print(f"[LangGraph Stream] 会话 ID: {thread_id}")
 
-            # 2. 使用 astream_events() 监听事件
-            # async for：异步迭代（每次生成一个事件）
-            # 传入 config（含 thread_id），确保 Checkpointer 正确关联会话
-            config = {"configurable": {"thread_id": request.session_id}}
-            async for event in fund_agent_graph.astream_events(
-                initial_state, config=config, version="v2"  # 使用 v2 版本（更详细）
-            ):
-                # 3. 只处理 LLM 生成 token 的事件
-                if event["event"] == "on_chat_model_stream":
-                    # 提取 token（chunk.content）
-                    chunk = event["data"]["chunk"]
-                    token = chunk.content
+            # 2. 流式执行，捕获合规中断
+            try:
+                async for event in get_graph().astream_events(
+                    initial_state, config=config, version="v2"
+                ):
+                    # --- token 流（仅 response_generator 发出的 token 才转发给前端） ---
+                    if event["event"] == "on_chat_model_stream":
+                        # 检查是哪个节点在调用 LLM — 只有 response_generator 的 token 才是最终回复
+                        node_name = event.get("metadata", {}).get("langgraph_node", "")
+                        if node_name == "response_generator":
+                            chunk = event["data"]["chunk"]
+                            token = chunk.content
+                            if not token:
+                                continue
+                            event_data = {"token": token}
+                            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-                    # 如果是空 token，跳过
-                    if not token:
-                        continue
+                    # --- 节点开始 ---
+                    elif event["event"] == "on_chain_start":
+                        node_name = event["name"]
+                        if node_name in NODE_LABELS:
+                            node_data = {"event": "node_start", "node": node_name, "label": NODE_LABELS[node_name]}
+                            yield f"data: {json.dumps(node_data, ensure_ascii=False)}\n\n"
+                            print(f"[LangGraph Stream] ▶ 节点: {NODE_LABELS[node_name]}")
 
-                    # 4. 返回 SSE 事件（data: {"token": "..."}\n\n）
-                    event_data = {"token": token}
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    elif event["event"] == "on_chain_end":
+                        node_name = event["name"]
+                        if node_name in NODE_LABELS:
+                            node_data = {"event": "node_end", "node": node_name, "label": NODE_LABELS[node_name]}
+                            yield f"data: {json.dumps(node_data, ensure_ascii=False)}\n\n"
+                            print(f"[LangGraph Stream] ✓ 节点完成: {NODE_LABELS[node_name]}")
 
-                # 5. （可选）处理节点开始/结束事件（用于调试）
-                elif event["event"] == "on_chain_start":
-                    node_name = event["name"]
-                    print(f"[LangGraph Stream] 节点开始: {node_name}")
+                # 3. 流式循环正常结束 — 检查是否被中断
+                current = await get_graph().aget_state(config)
+                pending = current.next  # 空列表 = 完成，非空 = 中断
 
-                elif event["event"] == "on_chain_end":
-                    node_name = event["name"]
-                    print(f"[LangGraph Stream] 节点结束: {node_name}")
+                if pending:
+                    # 图停在 compliance_checker 之后
+                    compliance = current.values.get("compliance_result", {})
+                    interrupted_data = {
+                        "status": "interrupted",
+                        "reply": f"⏸️ 合规审查 [{compliance.get('grade', '未知')}]，等待人工审批",
+                        "compliance_result": compliance,
+                        "pending_nodes": pending,
+                    }
+                    yield f"data: {json.dumps(interrupted_data, ensure_ascii=False)}\n\n"
+                    print(f"[LangGraph Stream] 合规中断 → 等待审批")
 
-            # 6. 流式输出结束，发送 [DONE] 事件
+            except GraphInterrupt as gi:
+                # 4. GraphInterrupt 异常（interrupt_after 触发）
+                current_state = await get_graph().aget_state(config)
+                compliance = current_state.values.get("compliance_result", {})
+                interrupted_data = {
+                    "status": "interrupted",
+                    "reply": f"⏸️ 合规审查 [{compliance.get('grade', '未知')}]，等待人工审批",
+                    "compliance_result": compliance,
+                }
+                yield f"data: {json.dumps(interrupted_data, ensure_ascii=False)}\n\n"
+                print(f"[LangGraph Stream] GraphInterrupt → 合规中断，等待审批")
+
+            # 5. 流结束
             yield "data: [DONE]\n\n"
-
             print(f"[LangGraph Stream] 流式输出完成")
 
         except Exception as e:
-            # 7. 错误处理
+            # 6. 错误处理
             error_msg = str(e)
             print(f"[LangGraph Stream] 错误: {error_msg}")
             import traceback
@@ -144,14 +214,14 @@ async def chat_stream(request: ChatRequest):
             yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-    # 8. 返回 StreamingResponse
+    # 返回 StreamingResponse
     return StreamingResponse(
         generate_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -165,7 +235,7 @@ async def health_check():
 @router.get("/agent/graph/mermaid")
 async def get_graph_mermaid():
     """获取状态图的 Mermaid 代码（可直接渲染）"""
-    graph = fund_agent_graph.get_graph()
+    graph = get_graph()
     mermaid_code = graph.draw_mermaid()
     return {"mermaid": mermaid_code}
 
@@ -175,7 +245,7 @@ async def get_graph_image():
     """获取状态图的 PNG 图片（base64 编码）"""
     import base64
 
-    graph = fund_agent_graph.get_graph()
+    graph = get_graph()
     image_bytes = graph.draw_mermaid_png()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     return {"image": f"data:image/png;base64,{image_b64}"}

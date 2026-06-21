@@ -63,3 +63,7 @@ class AgentState(TypedDict):
     previous_fund_info: Optional[Any]
 
     previous_analysis: Optional[dict]
+
+    # 新增
+    fund_codes: Optional[List[str]]  # 用户消息中提取的所有基金代码
+    all_funds: Optional[List[dict]]  # 无代码时查全库的结果
