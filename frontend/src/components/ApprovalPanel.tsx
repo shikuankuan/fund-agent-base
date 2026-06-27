@@ -1,11 +1,10 @@
-import React, { useState } from "react";
-import { submitApproval } from "@/services";
+import React from "react";
 import type { ComplianceResult } from "@/services";
 
 interface Props {
     sessionId: string;
     compliance: ComplianceResult;
-    onResolved: (reply: string) => void;
+    onResolved: (action: "approve" | "reject") => void;
 }
 
 const gradeStyle: Record<string, { color: string; label: string; bg: string }> = {
@@ -14,20 +13,11 @@ const gradeStyle: Record<string, { color: string; label: string; bg: string }> =
     block: { color: "#ff4d4f", label: "⛔ 拦截", bg: "#fff2f0" },
 };
 
-const ApprovalPanel: React.FC<Props> = ({ sessionId, compliance, onResolved }) => {
-    const [loading, setLoading] = useState(false);
+const ApprovalPanel: React.FC<Props> = ({ sessionId, onResolved, compliance }) => {
     const gs = gradeStyle[compliance.grade] || gradeStyle.block;
 
-    const handleAction = async (action: "approve" | "reject") => {
-        setLoading(true);
-        try {
-            const result = await submitApproval({ session_id: sessionId, action });
-            onResolved(result.reply);
-        } catch (err) {
-            console.error("审批失败:", err);
-        } finally {
-            setLoading(false);
-        }
+    const handleAction = (action: "approve" | "reject") => {
+        onResolved(action);
     };
 
     return (
@@ -61,34 +51,32 @@ const ApprovalPanel: React.FC<Props> = ({ sessionId, compliance, onResolved }) =
                 {compliance.grade !== "block" && (
                     <button
                         onClick={() => handleAction("approve")}
-                        disabled={loading}
                         style={{
                             padding: "6px 16px",
                             background: "#1677ff",
                             color: "#fff",
                             border: "none",
                             borderRadius: 6,
-                            cursor: loading ? "not-allowed" : "pointer",
+                            cursor: "pointer",
                             fontSize: 13,
                         }}
                     >
-                        {loading ? "处理中..." : "✅ 人工放行"}
+                        ✅ 人工放行
                     </button>
                 )}
                 <button
                     onClick={() => handleAction("reject")}
-                    disabled={loading}
                     style={{
                         padding: "6px 16px",
                         background: "#fff",
                         color: "#ff4d4f",
                         border: "1px solid #ff4d4f",
                         borderRadius: 6,
-                        cursor: loading ? "not-allowed" : "pointer",
+                        cursor: "pointer",
                         fontSize: 13,
                     }}
                 >
-                    {loading ? "处理中..." : "❌ 驳回"}
+                    ❌ 驳回
                 </button>
             </div>
         </div>

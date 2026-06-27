@@ -3,7 +3,9 @@ import ChatBubble from "./ChatBubble";
 import ChatInput from "./ChatInput";
 import ApprovalPanel from "./ApprovalPanel";
 import ThinkingPipeline from "./ThinkingPipeline";
-import { sendMessageStream } from "@/services";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { buildChatMessage, buildApprovalMessage } from "@/services/ws";
+import type { WsMessage } from "@/hooks/useWebSocket";
 import type { ComplianceResult } from "@/services";
 
 // ===== 消息类型 =====
@@ -23,13 +25,15 @@ interface ChatPanelProps {
     activeSession: string;
 }
 
+const WS_URL = `ws://localhost:8000/ws`;
+
 const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [streaming, setStreaming] = useState(false);
     const [interrupted, setInterrupted] = useState(false);
     const [sessionId] = useState(makeSessionId);
     const bottomRef = useRef<HTMLDivElement>(null);
-    const abortRef = useRef<(() => void) | null>(null);
+    const currentMsgIndexRef = useRef<number>(0);
 
     // 管道状态
     const [activeNode, setActiveNode] = useState<string | null>(null);
@@ -37,12 +41,108 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
     const [hasFirstToken, setHasFirstToken] = useState(false);
     const [pipelineDone, setPipelineDone] = useState(false);
 
+    // ── WebSocket 连接 ──
+    const { status, send, on } = useWebSocket({
+        url: WS_URL,
+        autoConnect: true,
+    });
+
     // 自动滚到底部
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
 
-    /** 发送消息（SSE 流式） */
+    // ── 注册 WebSocket 消息处理器（只执行一次） ──
+    useEffect(() => {
+        const unsubToken = on("token", (msg: WsMessage) => {
+            const token = msg.payload.token as string;
+            if (!token) return;
+
+            setHasFirstToken(true);
+            setMessages((prev) => {
+                const updated = [...prev];
+                const idx = currentMsgIndexRef.current;
+                const target = updated[idx];
+                if (target && target.role === "assistant") {
+                    updated[idx] = {
+                        ...target,
+                        content: target.content + token,
+                    };
+                }
+                return updated;
+            });
+        });
+
+        const unsubNodeStart = on("node_start", (msg: WsMessage) => {
+            const node = msg.payload.node as string;
+            setActiveNode(node);
+        });
+
+        const unsubNodeEnd = on("node_end", (msg: WsMessage) => {
+            const node = msg.payload.node as string;
+            setCompletedNodes((prev) => {
+                const next = new Set(prev);
+                next.add(node);
+                return next;
+            });
+            setActiveNode(null);
+            if (node === "response_generator") {
+                setPipelineDone(true);
+            }
+        });
+
+        const unsubInterrupted = on("interrupted", (msg: WsMessage) => {
+            setStreaming(false);
+            setInterrupted(true);
+            const cr = msg.payload.compliance_result as ComplianceResult | undefined;
+            setMessages((prev) => {
+                const updated = [...prev];
+                const idx = currentMsgIndexRef.current;
+                const target = updated[idx];
+                if (target && target.role === "assistant") {
+                    updated[idx] = {
+                        ...target,
+                        compliance: cr,
+                    };
+                }
+                return updated;
+            });
+        });
+
+        const unsubDone = on("done", () => {
+            setStreaming(false);
+            setActiveNode(null);
+        });
+
+        const unsubError = on("error", (msg: WsMessage) => {
+            setStreaming(false);
+            setActiveNode(null);
+            const errMsg = (msg.payload.message as string) || "未知错误";
+            setMessages((prev) => {
+                const updated = [...prev];
+                const idx = currentMsgIndexRef.current;
+                const target = updated[idx];
+                if (target && target.role === "assistant") {
+                    updated[idx] = {
+                        ...target,
+                        content: target.content + `\n\n❌ ${errMsg}`,
+                    };
+                }
+                return updated;
+            });
+        });
+
+        return () => {
+            unsubToken();
+            unsubNodeStart();
+            unsubNodeEnd();
+            unsubInterrupted();
+            unsubDone();
+            unsubError();
+        };
+    }, [on]);
+
+    /** 发送消息（WebSocket） */
     const handleSend = useCallback(
         (text: string) => {
             const userMsg: Message = {
@@ -50,14 +150,16 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
                 content: text,
                 timestamp: new Date().toLocaleTimeString(),
             };
-            // 空占位，逐字填充
             const assistantMsg: Message = {
                 role: "assistant",
                 content: "",
                 timestamp: new Date().toLocaleTimeString(),
             };
 
-            setMessages((prev) => [...prev, userMsg, assistantMsg]);
+            setMessages((prev) => {
+                currentMsgIndexRef.current = prev.length + 1; // user message at len, assistant at len+1
+                return [...prev, userMsg, assistantMsg];
+            });
             setStreaming(true);
             setInterrupted(false);
             setHasFirstToken(false);
@@ -65,109 +167,19 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
             setCompletedNodes(new Set());
             setPipelineDone(false);
 
-            // 拿到当前消息索引（闭包）
-            const currentLen = messages.length + 1; // 加了 user + assistant
-
-            const { abort } = sendMessageStream(
-                { message: text, session_id: sessionId },
-
-                // onToken —— 逐字追加
-                (token: string) => {
-                    setHasFirstToken(true);
-                    setMessages((prev) => {
-                        const updated = [...prev];
-                        const target = updated[currentLen];
-                        if (target && target.role === "assistant") {
-                            updated[currentLen] = {
-                                ...target,
-                                content: target.content + token,
-                            };
-                        }
-                        return updated;
-                    });
-                },
-
-                // onInterrupted —— 合规中断，弹出审批面板
-                (data) => {
-                    setStreaming(false);
-                    setInterrupted(true);
-                    setMessages((prev) => {
-                        const updated = [...prev];
-                        const target = updated[currentLen];
-                        if (target && target.role === "assistant") {
-                            updated[currentLen] = {
-                                ...target,
-                                content: data.reply || "（等待审批）",
-                                compliance: data.compliance_result,
-                            };
-                        }
-                        return updated;
-                    });
-                },
-
-                // onDone
-                () => {
-                    setStreaming(false);
-                    setActiveNode(null);
-                },
-
-                // onError
-                (err: string) => {
-                    setStreaming(false);
-                    setActiveNode(null);
-                    setMessages((prev) => {
-                        const updated = [...prev];
-                        const target = updated[currentLen];
-                        if (target && target.role === "assistant") {
-                            updated[currentLen] = {
-                                ...target,
-                                content: `❌ ${err}`,
-                            };
-                        }
-                        return updated;
-                    });
-                },
-
-                // onNodeEvent —— 管道节点状态
-                (event) => {
-                    if (event.type === "start") {
-                        setActiveNode(event.node);
-                    } else if (event.type === "end") {
-                        setCompletedNodes((prev) => {
-                            const next = new Set(prev);
-                            next.add(event.node);
-                            return next;
-                        });
-                        setActiveNode(null);
-                        // response_generator 完成 → 管道使命结束
-                        if (event.node === "response_generator") {
-                            setPipelineDone(true);
-                        }
-                    }
-                },
-            );
-
-            abortRef.current = abort;
+            send(buildChatMessage(text, sessionId));
         },
-        [messages.length, sessionId],
+        [send, sessionId],
     );
 
-    /** 审批完成后更新最后一条 AI 消息 */
-    const handleApprovalResolved = useCallback((reply: string) => {
-        setInterrupted(false);
-        setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last.role === "assistant") {
-                updated[updated.length - 1] = {
-                    ...last,
-                    content: reply,
-                    compliance: undefined,
-                };
-            }
-            return updated;
-        });
-    }, []);
+    /** 审批提交（WebSocket） */
+    const handleApprovalResolved = useCallback(
+        (action: "approve" | "reject") => {
+            setInterrupted(false);
+            send(buildApprovalMessage(sessionId, action));
+        },
+        [send, sessionId],
+    );
 
     const isEmpty = messages.length === 0;
 
@@ -228,7 +240,26 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
                             <ApprovalPanel
                                 sessionId={sessionId}
                                 compliance={msg.compliance}
-                                onResolved={handleApprovalResolved}
+                                onResolved={(action: "approve" | "reject") => {
+                                    setInterrupted(false);
+                                    setStreaming(true);
+                                    // 清空当前助手消息内容，等待 WebSocket 新 token 流
+                                    setMessages((prev) => {
+                                        const updated = [...prev];
+                                        const last = updated[updated.length - 1];
+                                        if (last.role === "assistant") {
+                                            updated[updated.length - 1] = {
+                                                ...last,
+                                                content: "",
+                                                compliance: undefined,
+                                            };
+                                            currentMsgIndexRef.current = updated.length - 1;
+                                        }
+                                        return updated;
+                                    });
+                                    // 通过 WebSocket 发送审批决定
+                                    handleApprovalResolved(action);
+                                }}
                             />
                         )}
                     </div>

@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.api.endpoints import router
 from app.api.resume import router as resume_router
+from app.api.websocket import router as ws_router
 from contextlib import asynccontextmanager
 
 
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Fund Agent API", lifespan=lifespan)
 app.include_router(router, prefix="/api")
 app.include_router(resume_router, prefix="/api")
+app.include_router(ws_router)  # WebSocket 无 /api 前缀 → ws://localhost:8000/ws
 
 if __name__ == "__main__":
     import uvicorn
