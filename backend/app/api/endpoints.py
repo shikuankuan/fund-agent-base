@@ -7,6 +7,7 @@ from typing import List, Optional, AsyncGenerator
 import json
 
 from app.agent.graph import get_graph
+from app.services.fund_data import fund_data_service
 from langgraph.errors import GraphInterrupt
 
 # ========== 请求/响应模型 ==========
@@ -355,3 +356,21 @@ async def cleanup_sessions(max_sessions: int = 50):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 基金净值历史（NavCard 折线图）──
+@router.get("/api/funds/{fund_code}/nav-history")
+async def get_nav_history(fund_code: str, range: str = "1m"):
+    """获取基金净值历史数据
+    
+    Args:
+        fund_code: 基金代码
+        range: 时间范围 1w/1m/3m/6m/1y
+    """
+    # 先校验基金存在
+    fund = fund_data_service.get_fund_info(fund_code)
+    if not fund:
+        raise HTTPException(status_code=404, detail=f"基金 {fund_code} 不存在")
+    
+    result = fund_data_service.get_fund_nav_history(fund_code, range)
+    return {"code": 0, "data": result, "fund_name": fund.name}

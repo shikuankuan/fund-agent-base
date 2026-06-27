@@ -689,7 +689,21 @@ def response_generator(state: AgentState) -> dict:
 - **对比或列举场景必须用 markdown 表格**（| 列1 | 列2 | 格式），表头放代码/名称/类型/风险/规模/经理等字段
 - 非表格内容用自然语言简要描述趋势或风险
 - 涉及投资建议必须附带风险提示
-- 回复长度 200-500 字""",
+- 回复长度 200-500 字
+
+## 数据卡片嵌入规则（重要）
+当用户查询某只基金的净值走势、持仓、风险指标时，在回复底部嵌入卡片标签，独占一行：
+- 净值走势：`<fund-nav-card code="XXXXXX"/>`
+- 基础信息：`<fund-info-card code="XXXXXX"/>`
+- 持仓分析：`<fund-holdings-card code="XXXXXX"/>`
+- 风险指标：`<fund-risk-card code="XXXXXX"/>`
+- 多基金对比：`<fund-compare-card codes="000001,005827"/>`
+
+示例：回复完文字后，空一行再放标签
+
+<fund-nav-card code="005827"/>
+<fund-info-card code="005827"/>
+注意：卡片标签必须独占一行，前后不要加任何无关文字。""",
             ),
             MessagesPlaceholder(variable_name="history"),
         ]

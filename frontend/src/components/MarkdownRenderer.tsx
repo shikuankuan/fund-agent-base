@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github.css";
 import { Table } from "antd";
 import type { TableColumnsType } from "antd";
+import FundNavCard from "./FundNavCard";
 
 interface Props {
     content: string;
@@ -27,7 +28,7 @@ const AntTable: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
     React.Children.forEach(children, (child) => {
         if (!React.isValidElement(child)) return;
-        const childType = child.type;                    // ✅ 直接比较,HTML 元素的 type 是字符串
+        const childType = child.type;
         if (childType === "thead") {
             const firstRow = React.Children.toArray(child.props.children)[0];
             if (React.isValidElement(firstRow)) {
@@ -87,93 +88,161 @@ const AntTable: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     );
 };
 
-const MarkdownRenderer: React.FC<Props> = ({ content }) => {
-    const components = useMemo(
-        () => ({
-            table: ({ children }: any) => <AntTable>{children}</AntTable>,
-            th: ({ children }: any) => <>{children}</>,
-            td: ({ children }: any) => <>{children}</>,
-            code: ({ className, children, ...props }: any) => {
-                const isInline = !className;
-                if (isInline) {
-                    return (
-                        <code
-                            {...props}
-                            style={{
-                                background: "#f5f5f5",
-                                padding: "2px 6px",
-                                borderRadius: 4,
-                                fontSize: "0.9em",
-                                color: "#cf1322",
-                            }}
-                        >
-                            {children}
-                        </code>
-                    );
-                }
-                return (
-                    <code className={className} {...props}>
-                        {children}
-                    </code>
-                );
-            },
-            a: ({ children, href, ...props }: any) => (
-                <a
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    {...props}
-                    style={{ color: "#1677ff" }}
-                >
-                    {children}
-                </a>
-            ),
-            hr: (props: any) => (
-                <hr {...props} style={{ border: "none", borderTop: "1px solid #e8ecf1", margin: "16px 0" }} />
-            ),
-            ul: ({ children, ...props }: any) => (
-                <ul {...props} style={{ paddingLeft: 20, margin: "8px 0" }}>
-                    {children}
-                </ul>
-            ),
-            ol: ({ children, ...props }: any) => (
-                <ol {...props} style={{ paddingLeft: 20, margin: "8px 0" }}>
-                    {children}
-                </ol>
-            ),
-            li: ({ children, ...props }: any) => (
-                <li {...props} style={{ marginBottom: 4 }}>
-                    {children}
-                </li>
-            ),
-            blockquote: ({ children, ...props }: any) => (
-                <blockquote
+// ── 卡片标签解析 ──
+// 正则：<fund-NAME-card code="XXXXXX"/>  或  codes="000001,005827"
+const CARD_TAG_RE = /<fund-(nav|info|holdings|risk|compare)-card\s+(code|codes)="([^"]+)"\s*\/>/g;
+
+interface CardSegment {
+    type: "text" | "card";
+    content: string;
+    cardType?: string;
+    codes?: string[];
+}
+
+/** 把原始 Markdown 按卡片标签切成 text + card 交替数组 */
+function parseContent(raw: string): CardSegment[] {
+    const segments: CardSegment[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = CARD_TAG_RE.exec(raw)) !== null) {
+        // 标签前的文字
+        if (match.index > lastIndex) {
+            segments.push({
+                type: "text",
+                content: raw.slice(lastIndex, match.index),
+            });
+        }
+        // 卡片
+        segments.push({
+            type: "card",
+            content: match[0],
+            cardType: match[1],            // nav / info / holdings / risk / compare
+            codes: match[3].split(",").map((s) => s.trim()),
+        });
+        lastIndex = match.index + match[0].length;
+    }
+
+    // 尾部文字
+    if (lastIndex < raw.length) {
+        segments.push({ type: "text", content: raw.slice(lastIndex) });
+    }
+
+    return segments;
+}
+
+// ── 卡片渲染映射 ──
+function renderCard(seg: CardSegment): React.ReactNode {
+    if (!seg.codes || seg.codes.length === 0) return null;
+    const code = seg.codes[0];
+
+    switch (seg.cardType) {
+        case "nav":
+            return <FundNavCard fundCode={code} />;
+        // TODO: info / holdings / risk / compare 卡片后续添加
+        default:
+            return null;
+    }
+}
+
+// ── 通用 markdown 组件 ──
+const markdownComponents = {
+    table: ({ children }: any) => <AntTable>{children}</AntTable>,
+    th: ({ children }: any) => <>{children}</>,
+    td: ({ children }: any) => <>{children}</>,
+    code: ({ className, children, ...props }: any) => {
+        const isInline = !className;
+        if (isInline) {
+            return (
+                <code
                     {...props}
                     style={{
-                        borderLeft: "3px solid #1677ff",
-                        paddingLeft: 12,
-                        margin: "8px 0",
-                        color: "#6b7280",
-                        background: "#f0f5ff",
-                        borderRadius: "0 4px 4px 0",
-                        padding: "8px 12px",
+                        background: "#f5f5f5",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        fontSize: "0.9em",
+                        color: "#cf1322",
                     }}
                 >
                     {children}
-                </blockquote>
-            ),
-        }),
-        [],
-    );
+                </code>
+            );
+        }
+        return (
+            <code className={className} {...props}>
+                {children}
+            </code>
+        );
+    },
+    a: ({ children, href, ...props }: any) => (
+        <a href={href} target="_blank" rel="noopener noreferrer" {...props} style={{ color: "#1677ff" }}>
+            {children}
+        </a>
+    ),
+    hr: (props: any) => (
+        <hr {...props} style={{ border: "none", borderTop: "1px solid #e8ecf1", margin: "16px 0" }} />
+    ),
+    ul: ({ children, ...props }: any) => (
+        <ul {...props} style={{ paddingLeft: 20, margin: "8px 0" }}>
+            {children}
+        </ul>
+    ),
+    ol: ({ children, ...props }: any) => (
+        <ol {...props} style={{ paddingLeft: 20, margin: "8px 0" }}>
+            {children}
+        </ol>
+    ),
+    li: ({ children, ...props }: any) => (
+        <li {...props} style={{ marginBottom: 4 }}>
+            {children}
+        </li>
+    ),
+    blockquote: ({ children, ...props }: any) => (
+        <blockquote
+            {...props}
+            style={{
+                borderLeft: "3px solid #1677ff",
+                paddingLeft: 12,
+                margin: "8px 0",
+                color: "#6b7280",
+                background: "#f0f5ff",
+                borderRadius: "0 4px 4px 0",
+                padding: "8px 12px",
+            }}
+        >
+            {children}
+        </blockquote>
+    ),
+};
+
+// ── 主组件 ──
+const MarkdownRenderer: React.FC<Props> = ({ content }) => {
+    const components = useMemo(() => markdownComponents, []);
+
+    // 1. 解析卡片标签
+    const segments = useMemo(() => parseContent(content), [content]);
 
     return (
-        <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
-            components={components}
-        >
-            {content}
-        </ReactMarkdown>
+        <div>
+            {segments.map((seg, i) => {
+                if (seg.type === "card") {
+                    return <div key={`card-${i}`}>{renderCard(seg)}</div>;
+                }
+                // 跳过纯空白的 text 段
+                if (!seg.content.trim()) return null;
+
+                return (
+                    <ReactMarkdown
+                        key={`md-${i}`}
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeHighlight]}
+                        components={components}
+                    >
+                        {seg.content}
+                    </ReactMarkdown>
+                );
+            })}
+        </div>
     );
 };
 

@@ -540,22 +540,59 @@ class FundDataService:
             净值历史列表
         """
         import datetime as dt
+        import random
 
-        nav_history = []
-        base_nav = 2.3456
+        fund_data = FUND_DATABASE.get(fund_code)
+        if not fund_data:
+            return []
+
+        # 用该基金真实当前净值作为基准
+        base_nav = fund_data["nav"]["nav"]
+        fund_type = fund_data["type"]
+
+        # 不同类型基金波动率不同
+        volatility_map = {
+            "股票型": 2.5,
+            "混合型": 1.8,
+            "债券型": 0.3,
+            "货币型": 0.05,
+        }
+        vol = volatility_map.get(fund_type, 1.5)
+
+        # 不同类型基金的长期趋势（年化）
+        trend_map = {
+            "股票型": 8.0 / 365,
+            "混合型": 6.0 / 365,
+            "债券型": 3.5 / 365,
+            "货币型": 2.0 / 365,
+        }
+        daily_trend = trend_map.get(fund_type, 5.0 / 365)
 
         days_map = {"1w": 7, "1m": 30, "3m": 90, "6m": 180, "1y": 365}
-
         days = days_map.get(date_range, 30)
 
+        nav_history = []
+        rand = random.Random(42 + int(fund_code) % 100)  # 固定种子，同基金同序列
+        current = base_nav
+
         for i in range(days):
-            d = dt.datetime.now() - dt.timedelta(days=days - i)
-            nav = base_nav * (1 + (i % 10 - 5) * 0.01)  # 模拟波动
+            d = dt.date.today() - dt.timedelta(days=days - i)
+            if i == 0:
+                # 第一天从远端起算：用随机游走倒退
+                temp = base_nav
+                for _ in range(days):
+                    temp /= (1 + daily_trend + rand.gauss(0, vol / 100))
+                current = round(temp, 4)
+
+            # 每天波动 = 趋势 + 随机（正态分布）
+            daily_return = daily_trend + rand.gauss(0, vol / 100)
+            current = round(current * (1 + daily_return), 4)
+
             nav_history.append(
                 {
                     "date": d.strftime("%Y-%m-%d"),
-                    "nav": round(nav, 4),
-                    "change": round((nav - base_nav) / base_nav * 100, 2),
+                    "nav": current,
+                    "change_pct": round(daily_return * 100, 2),
                 }
             )
 
