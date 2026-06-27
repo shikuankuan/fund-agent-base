@@ -246,9 +246,7 @@ def data_fetcher(state: AgentState) -> dict:
 
     elif intent in fund_related_intents:
         # 无代码 + 基金意图 → 查全库
-        all_funds = [
-            service.get_fund_info(code).model_dump() for code in FUND_DATABASE
-        ]
+        all_funds = [service.get_fund_info(code).model_dump() for code in FUND_DATABASE]
         update["all_funds"] = all_funds
         if all_funds:
             update["current_fund"] = all_funds[0]["code"]
@@ -273,8 +271,14 @@ def data_fetcher(state: AgentState) -> dict:
         print(f"[数据获取] 换基金: {old_current} → {new_current}")
 
     fi = update.get("fund_info")
-    fi_name = fi.name if hasattr(fi, "name") else (fi.get("name", "?") if isinstance(fi, dict) else "?")
-    print(f"[数据获取] ✓ current={new_current}({fi_name}) | all_funds={len(update.get('all_funds', []))}只")
+    fi_name = (
+        fi.name
+        if hasattr(fi, "name")
+        else (fi.get("name", "?") if isinstance(fi, dict) else "?")
+    )
+    print(
+        f"[数据获取] ✓ current={new_current}({fi_name}) | all_funds={len(update.get('all_funds', []))}只"
+    )
     return update
 
 
@@ -328,34 +332,44 @@ def analyzer(state: AgentState) -> dict:
     if intent == "compare" and len(all_funds) >= 2:
         analysis_result["comparison"] = []
         for f in all_funds:
-            fd = extract_analysis(f) if not hasattr(f, "model_dump") else extract_analysis(f)
+            fd = (
+                extract_analysis(f)
+                if not hasattr(f, "model_dump")
+                else extract_analysis(f)
+            )
             # 如果 f 已经是 dict
             if isinstance(f, dict):
                 nav = f.get("nav", {}) or {}
                 risk = f.get("risk_metrics", {}) or {}
                 mgr = f.get("manager", {}) or {}
-                analysis_result["comparison"].append({
-                    "code": f.get("code"),
-                    "name": f.get("name"),
-                    "company": f.get("company"),
-                    "type": f.get("type"),
-                    "risk_level": f.get("risk_level"),
-                    "nav": nav.get("nav"),
-                    "return_1y": nav.get("yearly_change"),
-                    "sharpe": risk.get("sharpe_ratio"),
-                    "max_drawdown": risk.get("max_drawdown"),
-                    "manager": mgr.get("name"),
-                })
+                analysis_result["comparison"].append(
+                    {
+                        "code": f.get("code"),
+                        "name": f.get("name"),
+                        "company": f.get("company"),
+                        "type": f.get("type"),
+                        "risk_level": f.get("risk_level"),
+                        "nav": nav.get("nav"),
+                        "return_1y": nav.get("yearly_change"),
+                        "sharpe": risk.get("sharpe_ratio"),
+                        "max_drawdown": risk.get("max_drawdown"),
+                        "manager": mgr.get("name"),
+                    }
+                )
             else:
                 fd = extract_analysis(f)
                 if fd:
-                    analysis_result["comparison"].append({
-                        "code": fd.get("fund_code"),
-                        "name": fd.get("fund_name"),
-                        "risk_level": fd.get("risk", {}).get("risk_level"),
-                    })
+                    analysis_result["comparison"].append(
+                        {
+                            "code": fd.get("fund_code"),
+                            "name": fd.get("fund_name"),
+                            "risk_level": fd.get("risk", {}).get("risk_level"),
+                        }
+                    )
 
-    print(f"[分析计算] 基金: {analysis_result.get('fund_code')} | 风险: {analysis_result.get('risk', {}).get('risk_level')}")
+    print(
+        f"[分析计算] 基金: {analysis_result.get('fund_code')} | 风险: {analysis_result.get('risk', {}).get('risk_level')}"
+    )
     print(f"[分析计算] 对比基金数: {len(analysis_result.get('comparison', []))}")
     return {"analysis_result": analysis_result}
 
@@ -439,6 +453,7 @@ def compliance_checker(state: AgentState) -> dict:
     if not investor_risk:
         # 兜底：从当前消息提取
         import re
+
         risk_levels = re.findall(r"R[1-5]", user_message)
         investor_risk = risk_levels[0] if risk_levels else "R3"
 
@@ -450,7 +465,11 @@ def compliance_checker(state: AgentState) -> dict:
         fund_risk_label = d.get("risk_level", "中风险")
     elif isinstance(analysis_result, dict):
         fund_risk = analysis_result.get("risk", {})
-        fund_risk_label = fund_risk.get("risk_level", "中风险") if isinstance(fund_risk, dict) else "中风险"
+        fund_risk_label = (
+            fund_risk.get("risk_level", "中风险")
+            if isinstance(fund_risk, dict)
+            else "中风险"
+        )
 
     risk_mapping = {
         "低风险": "R1",
@@ -607,7 +626,11 @@ def response_generator(state: AgentState) -> dict:
         name = d.get("name", "未知")
         company = d.get("company", "未知")
         mgr = d.get("manager", {}) or {}
-        manager = mgr.get("name", "") if isinstance(mgr, dict) else (mgr.name if hasattr(mgr, "name") else "")
+        manager = (
+            mgr.get("name", "")
+            if isinstance(mgr, dict)
+            else (mgr.name if hasattr(mgr, "name") else "")
+        )
         risk = d.get("risk_level", "")
         return name, company, manager, risk
 
@@ -630,7 +653,11 @@ def response_generator(state: AgentState) -> dict:
     if all_funds_list:
         lines = ["## 可用的完整基金列表（共 {} 只）\n".format(len(all_funds_list))]
         for f in all_funds_list:
-            d = f if isinstance(f, dict) else (f.model_dump() if hasattr(f, "model_dump") else {})
+            d = (
+                f
+                if isinstance(f, dict)
+                else (f.model_dump() if hasattr(f, "model_dump") else {})
+            )
             nav = d.get("nav", {}) or {}
             risk_metrics = d.get("risk_metrics", {}) or {}
             mgr = d.get("manager", {}) or {}
@@ -691,19 +718,23 @@ def response_generator(state: AgentState) -> dict:
 - 涉及投资建议必须附带风险提示
 - 回复长度 200-500 字
 
-## 数据卡片嵌入规则（重要）
-当用户查询某只基金的净值走势、持仓、风险指标时，在回复底部嵌入卡片标签，独占一行：
+## 数据卡片嵌入规则（必须遵守）
+
+根据对话意图，在回复末尾嵌入对应的卡片标签：
+
+### 单基金查询（净值/持仓/风险/信息）
 - 净值走势：`<fund-nav-card code="XXXXXX"/>`
 - 基础信息：`<fund-info-card code="XXXXXX"/>`
 - 持仓分析：`<fund-holdings-card code="XXXXXX"/>`
 - 风险指标：`<fund-risk-card code="XXXXXX"/>`
-- 多基金对比：`<fund-compare-card codes="000001,005827"/>`
 
-示例：回复完文字后，空一行再放标签
+### 多基金对比（最高优先级）
+- 当用户意图为 compare（对比/比较/vs/哪个好/区别）时，必须在回复末尾嵌入对比卡片
+- 格式：`<fund-compare-card codes="代码1,代码2,代码3"/>`
+- 把所有参与对比的基金代码用英文逗号拼在一起，例如 `<fund-compare-card codes="000001,005827,110011"/>`
+- **不要写硬编码的 000001，要使用上下文中实际被对比的基金代码**
 
-<fund-nav-card code="005827"/>
-<fund-info-card code="005827"/>
-注意：卡片标签必须独占一行，前后不要加任何无关文字。""",
+**卡片标签必须独占一行，前后不能加任何无关文字。每条标签独占一行。**""",
             ),
             MessagesPlaceholder(variable_name="history"),
         ]

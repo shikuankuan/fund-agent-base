@@ -6,6 +6,10 @@ import "highlight.js/styles/github.css";
 import { Table } from "antd";
 import type { TableColumnsType } from "antd";
 import FundNavCard from "./FundNavCard";
+import FundHoldingsCard from "./FundHoldingsCard";
+import FundRiskCard from "./FundRiskCard";
+import FundInfoCard from "./FundInfoCard";
+import FundCompareCard from "./FundCompareCard";
 
 interface Props {
     content: string;
@@ -26,23 +30,38 @@ const AntTable: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const cols: string[] = [];
     const rows: string[][] = [];
 
-    React.Children.forEach(children, (child) => {
+    // 过滤掉空白文本节点（markdown 解析产生的换行符会变成 <tr> 内的文本节点 → React 报错）
+    const elements = React.Children.toArray(children).filter(
+        (c) => React.isValidElement(c) || (typeof c === "string" && c.trim() !== "")
+    );
+
+    elements.forEach((child) => {
         if (!React.isValidElement(child)) return;
         const childType = child.type;
         if (childType === "thead") {
-            const firstRow = React.Children.toArray(child.props.children)[0];
+            const trChildren = React.Children.toArray(child.props.children).filter(
+                (c: any) => React.isValidElement(c)
+            );
+            const firstRow = trChildren[0];
             if (React.isValidElement(firstRow)) {
                 React.Children.forEach(firstRow.props.children, (th: any) => {
-                    cols.push(extractText(th));
+                    if (React.isValidElement(th) || typeof th === "string") {
+                        cols.push(extractText(th));
+                    }
                 });
             }
         }
         if (childType === "tbody") {
-            React.Children.forEach(child.props.children, (tr: any) => {
+            const trElements = React.Children.toArray(child.props.children).filter(
+                (c: any) => React.isValidElement(c)
+            );
+            trElements.forEach((tr: any) => {
                 if (!React.isValidElement(tr)) return;
                 const row: string[] = [];
                 React.Children.forEach(tr.props.children, (td: any) => {
-                    row.push(extractText(td));
+                    if (React.isValidElement(td) || typeof td === "string") {
+                        row.push(extractText(td));
+                    }
                 });
                 rows.push(row);
             });
@@ -53,7 +72,7 @@ const AntTable: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         return (
             <div style={{ overflowX: "auto", margin: "12px 0" }}>
                 <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
-                    {children}
+                    {elements}
                 </table>
             </div>
         );
@@ -139,7 +158,15 @@ function renderCard(seg: CardSegment): React.ReactNode {
     switch (seg.cardType) {
         case "nav":
             return <FundNavCard fundCode={code} />;
-        // TODO: info / holdings / risk / compare 卡片后续添加
+        case "holdings":
+            return <FundHoldingsCard fundCode={code} />;
+        case "risk":
+            return <FundRiskCard fundCode={code} />;
+        case "info":
+            return <FundInfoCard fundCode={code} />;
+        case "compare":
+            return <FundCompareCard codes={seg.codes.join(",")} />;
+
         default:
             return null;
     }

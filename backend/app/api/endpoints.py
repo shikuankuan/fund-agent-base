@@ -1,6 +1,6 @@
 """API 路由定义"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, AsyncGenerator
@@ -160,16 +160,28 @@ async def chat_stream(request: ChatRequest):
                     elif event["event"] == "on_chain_start":
                         node_name = event["name"]
                         if node_name in NODE_LABELS:
-                            node_data = {"event": "node_start", "node": node_name, "label": NODE_LABELS[node_name]}
+                            node_data = {
+                                "event": "node_start",
+                                "node": node_name,
+                                "label": NODE_LABELS[node_name],
+                            }
                             yield f"data: {json.dumps(node_data, ensure_ascii=False)}\n\n"
-                            print(f"[LangGraph Stream] ▶ 节点: {NODE_LABELS[node_name]}")
+                            print(
+                                f"[LangGraph Stream] ▶ 节点: {NODE_LABELS[node_name]}"
+                            )
 
                     elif event["event"] == "on_chain_end":
                         node_name = event["name"]
                         if node_name in NODE_LABELS:
-                            node_data = {"event": "node_end", "node": node_name, "label": NODE_LABELS[node_name]}
+                            node_data = {
+                                "event": "node_end",
+                                "node": node_name,
+                                "label": NODE_LABELS[node_name],
+                            }
                             yield f"data: {json.dumps(node_data, ensure_ascii=False)}\n\n"
-                            print(f"[LangGraph Stream] ✓ 节点完成: {NODE_LABELS[node_name]}")
+                            print(
+                                f"[LangGraph Stream] ✓ 节点完成: {NODE_LABELS[node_name]}"
+                            )
 
                 # 3. 流式循环正常结束 — 检查是否被中断
                 current = await get_graph().aget_state(config)
@@ -359,10 +371,10 @@ async def cleanup_sessions(max_sessions: int = 50):
 
 
 # ── 基金净值历史（NavCard 折线图）──
-@router.get("/api/funds/{fund_code}/nav-history")
+@router.get("/funds/{fund_code}/nav-history")
 async def get_nav_history(fund_code: str, range: str = "1m"):
     """获取基金净值历史数据
-    
+
     Args:
         fund_code: 基金代码
         range: 时间范围 1w/1m/3m/6m/1y
@@ -371,6 +383,51 @@ async def get_nav_history(fund_code: str, range: str = "1m"):
     fund = fund_data_service.get_fund_info(fund_code)
     if not fund:
         raise HTTPException(status_code=404, detail=f"基金 {fund_code} 不存在")
-    
+
     result = fund_data_service.get_fund_nav_history(fund_code, range)
     return {"code": 0, "data": result, "fund_name": fund.name}
+
+
+# ── 基金持仓详情（HoldingsCard 饼图/条形图）──
+@router.get("/funds/{fund_code}/holdings")
+async def get_holdings_detail(fund_code: str):
+    """获取基金持仓详情（重仓股、行业分布、资产配置）"""
+    result = fund_data_service.get_holdings_detail(fund_code)
+    if not result:
+        raise HTTPException(
+            status_code=404, detail=f"基金 {fund_code} 不存在或无持仓数据"
+        )
+    return {"code": 0, "data": result}
+
+
+# ── 基金风险指标（RiskCard 雷达图）──
+@router.get("/funds/{fund_code}/risk-metrics")
+async def get_risk_metrics(fund_code: str):
+    """获取基金风险指标"""
+    result = fund_data_service.get_risk_detail(fund_code)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"基金 {fund_code} 不存在")
+    return {"code": 0, "data": result}
+
+
+# ── 基金基本信息（InfoCard）──
+@router.get("/funds/{fund_code}/info")
+async def get_fund_info(fund_code: str):
+    """获取基金基本信息"""
+    result = fund_data_service.get_fund_info_detail(fund_code)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"基金 {fund_code} 不存在")
+    return {"code": 0, "data": result}
+
+
+# ── 基金多基金对比（CompareCard）──
+@router.get("/funds/compare")
+async def get_compare_data(
+    codes: str = Query(..., description="逗号分隔的基金代码，如 000001,005827")
+):
+    """对比多只基金"""
+    fund_codes = [c.strip() for c in codes.split(",") if c.strip()]
+    if not fund_codes:
+        raise HTTPException(status_code=400, detail="请提供至少一个基金代码")
+    result = fund_data_service.get_compare_data(fund_codes)
+    return {"code": 0, "data": result}

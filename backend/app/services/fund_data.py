@@ -224,6 +224,22 @@ FUND_DATABASE: dict = {
                     "market_value": 12350.0,
                     "proportion": 7.8,
                 },
+                {
+                    "rank": 4,
+                    "stock_code": "300124",
+                    "stock_name": "汇川技术",
+                    "shares": 180.0,
+                    "market_value": 10530.0,
+                    "proportion": 6.5,
+                },
+                {
+                    "rank": 5,
+                    "stock_code": "002475",
+                    "stock_name": "立讯精密",
+                    "shares": 320.0,
+                    "market_value": 8960.0,
+                    "proportion": 5.2,
+                },
             ],
             "industry_distribution": {"医药": 45.2, "消费": 25.3, "科技": 15.5},
             "asset_allocation": {"股票": 88.5, "债券": 5.2, "现金": 6.3},
@@ -268,6 +284,9 @@ FUND_DATABASE: dict = {
             "top_holdings": [
                 {"rank": 1, "stock_code": "019706", "stock_name": "23国债06", "shares": 500.0, "market_value": 50250.0, "proportion": 4.2},
                 {"rank": 2, "stock_code": "019704", "stock_name": "23国债04", "shares": 400.0, "market_value": 40200.0, "proportion": 3.5},
+                {"rank": 3, "stock_code": "102380221", "stock_name": "23华能MTN001", "shares": 350.0, "market_value": 35280.0, "proportion": 2.8},
+                {"rank": 4, "stock_code": "102380319", "stock_name": "23中石油MTN002", "shares": 300.0, "market_value": 30150.0, "proportion": 2.5},
+                {"rank": 5, "stock_code": "1684268", "stock_name": "23进出06", "shares": 250.0, "market_value": 25100.0, "proportion": 2.1},
             ],
             "industry_distribution": {"国债": 35.0, "信用债": 45.0, "现金": 20.0},
             "asset_allocation": {"债券": 95.2, "现金": 4.8},
@@ -597,6 +616,98 @@ class FundDataService:
             )
 
         return nav_history
+
+    def get_holdings_detail(self, fund_code: str) -> Optional[Dict]:
+        """获取基金持仓详情（用于图表卡片）"""
+        fund_data = FUND_DATABASE.get(fund_code)
+        if not fund_data:
+            return None
+        holdings = fund_data["holdings"]
+        return {
+            "fund_code": fund_data["code"],
+            "fund_name": fund_data["name"],
+            "report_date": holdings["report_date"].strftime("%Y-%m-%d"),
+            "top_holdings": [
+                {
+                    "rank": h["rank"],
+                    "stock_code": h["stock_code"],
+                    "stock_name": h["stock_name"],
+                    "shares": h["shares"],
+                    "market_value": h["market_value"],
+                    "proportion": h["proportion"],
+                }
+                for h in holdings["top_holdings"]
+            ],
+            "industry_distribution": holdings["industry_distribution"],
+            "asset_allocation": holdings["asset_allocation"],
+        }
+
+
+    def get_risk_detail(self, fund_code: str) -> Optional[Dict]:
+        """获取基金风险指标详情（用于风险卡片）"""
+        fund_data = FUND_DATABASE.get(fund_code)
+        if not fund_data:
+            return None
+        return {
+            "fund_code": fund_data["code"],
+            "fund_name": fund_data["name"],
+            "risk_level": fund_data["risk_level"],
+            "fund_type": fund_data["type"],
+            "metrics": fund_data["risk_metrics"],
+            "returns": {
+                "monthly": fund_data["nav"]["monthly_change"],
+                "yearly": fund_data["nav"]["yearly_change"],
+            },
+        }
+
+    def get_fund_info_detail(self, fund_code: str) -> Optional[Dict]:
+        """获取基金基本信息详情（用于信息卡片）"""
+        fund_data = FUND_DATABASE.get(fund_code)
+        if not fund_data:
+            return None
+        return {
+            "fund_code": fund_data["code"],
+            "fund_name": fund_data["name"],
+            "fund_type": fund_data["type"],
+            "risk_level": fund_data["risk_level"],
+            "company": fund_data["company"],
+            "custodian": fund_data["custodian"],
+            "founded_date": fund_data["founded_date"].strftime("%Y-%m-%d"),
+            "scale": fund_data["scale"],
+            "description": fund_data["description"],
+            "manager": fund_data["manager"],
+            "nav": {
+                "current": fund_data["nav"]["nav"],
+                "cumulative": fund_data["nav"]["accumulative_nav"],
+                "daily_change": fund_data["nav"]["daily_change"],
+                "yearly_change": fund_data["nav"]["yearly_change"],
+            },
+            "risk_metrics": fund_data["risk_metrics"],
+        }
+
+
+    def get_compare_data(self, fund_codes: List[str]) -> List[Dict]:
+        """获取多只基金对比数据"""
+        result = []
+        for code in fund_codes:
+            fd = FUND_DATABASE.get(code)
+            if not fd:
+                continue
+            result.append({
+                "fund_code": fd["code"],
+                "fund_name": fd["name"],
+                "fund_type": fd["type"],
+                "risk_level": fd["risk_level"],
+                "company": fd["company"],
+                "scale": fd["scale"],
+                "founded_date": fd["founded_date"].strftime("%Y-%m-%d"),
+                "manager": fd["manager"]["name"],
+                "nav_current": fd["nav"]["nav"],
+                "nav_daily_change": fd["nav"]["daily_change"],
+                "nav_yearly_change": fd["nav"]["yearly_change"],
+                "risk_metrics": fd["risk_metrics"],
+            })
+        return result
 
 
 # 创建全局数据服务实例
