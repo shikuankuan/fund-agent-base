@@ -3,55 +3,96 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github.css";
+import { Table } from "antd";
+import type { TableColumnsType } from "antd";
 
 interface Props {
     content: string;
 }
 
+// ── 递归提取 React 节点的纯文本 ──
+function extractText(node: React.ReactNode): string {
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(extractText).join("");
+    if (React.isValidElement(node)) {
+        return extractText((node.props as any).children);
+    }
+    return "";
+}
+
+// ── markdown 表格 → antd Table ──
+const AntTable: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const cols: string[] = [];
+    const rows: string[][] = [];
+
+    React.Children.forEach(children, (child) => {
+        if (!React.isValidElement(child)) return;
+        const childType = child.type;                    // ✅ 直接比较,HTML 元素的 type 是字符串
+        if (childType === "thead") {
+            const firstRow = React.Children.toArray(child.props.children)[0];
+            if (React.isValidElement(firstRow)) {
+                React.Children.forEach(firstRow.props.children, (th: any) => {
+                    cols.push(extractText(th));
+                });
+            }
+        }
+        if (childType === "tbody") {
+            React.Children.forEach(child.props.children, (tr: any) => {
+                if (!React.isValidElement(tr)) return;
+                const row: string[] = [];
+                React.Children.forEach(tr.props.children, (td: any) => {
+                    row.push(extractText(td));
+                });
+                rows.push(row);
+            });
+        }
+    });
+
+    if (cols.length === 0 || rows.length === 0) {
+        return (
+            <div style={{ overflowX: "auto", margin: "12px 0" }}>
+                <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+                    {children}
+                </table>
+            </div>
+        );
+    }
+
+    const columns: TableColumnsType = cols.map((col, i) => ({
+        title: col,
+        dataIndex: `col_${i}`,
+        key: `col_${i}`,
+        ellipsis: true,
+    }));
+
+    const dataSource = rows.map((row, i) => {
+        const record: Record<string, string> = { key: `row_${i}` };
+        row.forEach((cell, j) => {
+            record[`col_${j}`] = cell;
+        });
+        return record;
+    });
+
+    return (
+        <div style={{ margin: "12px 0", maxWidth: "100%" }}>
+            <Table
+                columns={columns}
+                dataSource={dataSource}
+                pagination={false}
+                size="small"
+                bordered
+                scroll={{ x: "max-content" }}
+            />
+        </div>
+    );
+};
+
 const MarkdownRenderer: React.FC<Props> = ({ content }) => {
     const components = useMemo(
         () => ({
-            table: ({ children, ...props }: any) => (
-                <div style={{ overflowX: "auto", margin: "12px 0" }}>
-                    <table
-                        {...props}
-                        style={{
-                            borderCollapse: "collapse",
-                            width: "100%",
-                            fontSize: 13,
-                        }}
-                    >
-                        {children}
-                    </table>
-                </div>
-            ),
-            th: ({ children, ...props }: any) => (
-                <th
-                    {...props}
-                    style={{
-                        border: "1px solid #e8ecf1",
-                        padding: "8px 12px",
-                        background: "#f0f5ff",
-                        fontWeight: 600,
-                        textAlign: "left",
-                        whiteSpace: "nowrap",
-                    }}
-                >
-                    {children}
-                </th>
-            ),
-            td: ({ children, ...props }: any) => (
-                <td
-                    {...props}
-                    style={{
-                        border: "1px solid #e8ecf1",
-                        padding: "6px 12px",
-                        fontSize: 13,
-                    }}
-                >
-                    {children}
-                </td>
-            ),
+            table: ({ children }: any) => <AntTable>{children}</AntTable>,
+            th: ({ children }: any) => <>{children}</>,
+            td: ({ children }: any) => <>{children}</>,
             code: ({ className, children, ...props }: any) => {
                 const isInline = !className;
                 if (isInline) {
