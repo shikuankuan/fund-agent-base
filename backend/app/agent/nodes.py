@@ -106,6 +106,9 @@ def intent_recognizer(state: AgentState) -> dict:
     if risk_match:
         update["user_risk_level"] = f"R{risk_match.group(1)}"
         print(f"[意图识别] 检测到用户风险等级: {update['user_risk_level']}")
+    # 清空工具调用记录（新消息开始）
+    update["tool_invocations"] = []
+
     # 返回需要更新的状态字段
     # 注意：只返回要更新的字段，不是整个状态
     return update

@@ -1,5 +1,6 @@
 """Agent 状态定义"""
 
+import operator
 from typing import TypedDict, Annotated, List, Optional, Dict, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -67,3 +68,8 @@ class AgentState(TypedDict):
     # 新增
     fund_codes: Optional[List[str]]  # 用户消息中提取的所有基金代码
     all_funds: Optional[List[dict]]  # 无代码时查全库的结果
+
+    # 工具调用记录（供 WebSocket 读取发送 tool_call/tool_result 事件）
+    # 每个元素: {"tool": str, "args": dict, "result": any, "status": "running"|"done"}
+    # 使用 operator.add 做累积（新消息开始时由 intent_recognizer 清空）
+    tool_invocations: Annotated[list, operator.add]

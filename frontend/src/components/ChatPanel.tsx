@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import ChatBubble from "./ChatBubble";
 import ChatInput from "./ChatInput";
 import ApprovalPanel from "./ApprovalPanel";
-import ThinkingPipeline from "./ThinkingPipeline";
+import AgentFlow, { type NodeSummary } from "./AgentFlow";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { buildChatMessage, buildApprovalMessage } from "@/services/ws";
 import type { WsMessage } from "@/hooks/useWebSocket";
@@ -14,6 +14,7 @@ interface Message {
     content: string;
     compliance?: ComplianceResult;
     timestamp: string;
+    pipelineNodes?: NodeSummary[]; // 本消息对应的执行流程
 }
 
 // ===== 会话 ID =====
@@ -27,6 +28,9 @@ interface ChatPanelProps {
 
 const WS_URL = `ws://localhost:8000/ws`;
 
+// 最小显示时长（毫秒）
+const MIN_NODE_VISIBLE_MS = 500;
+
 const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [streaming, setStreaming] = useState(false);
@@ -35,11 +39,28 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
     const bottomRef = useRef<HTMLDivElement>(null);
     const currentMsgIndexRef = useRef<number>(0);
 
-    // 管道状态
-    const [activeNode, setActiveNode] = useState<string | null>(null);
-    const [completedNodes, setCompletedNodes] = useState<Set<string>>(new Set());
-    const [hasFirstToken, setHasFirstToken] = useState(false);
-    const [pipelineDone, setPipelineDone] = useState(false);
+    // 执行流程节点
+    const [pipelineNodes, setPipelineNodes] = useState<NodeSummary[]>([]);
+    const pipelineNodesRef = useRef<NodeSummary[]>([]);
+
+    // 记录每个节点的 active 开始时间（处理 0.5s 最小可见）
+    const activeTimestamps = useRef<Map<string, number>>(new Map());
+    const doneTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+    // 追踪是否已收到第一个 token（用于标记 response_generator done）
+    const firstTokenReceived = useRef(false);
+
+    // 同步 ref
+    useEffect(() => {
+        pipelineNodesRef.current = pipelineNodes;
+    }, [pipelineNodes]);
+
+    // 组件卸载时清除所有定时器
+    useEffect(() => {
+        return () => {
+            doneTimers.current.forEach((t) => clearTimeout(t));
+        };
+    }, []);
 
     // ── WebSocket 连接 ──
     const { status, send, on } = useWebSocket({
@@ -50,47 +71,99 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
     // 自动滚到底部
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [messages]);
+    }, [messages, pipelineNodes]);
 
-    // ── 注册 WebSocket 消息处理器（只执行一次） ──
+    // ── 注册 WebSocket 消息处理器 ──
     useEffect(() => {
+        // ① 流式 token
         const unsubToken = on("token", (msg: WsMessage) => {
             const token = msg.payload.token as string;
             if (!token) return;
 
-            setHasFirstToken(true);
+            // 追加 token 到消息
             setMessages((prev) => {
                 const updated = [...prev];
                 const idx = currentMsgIndexRef.current;
                 const target = updated[idx];
                 if (target && target.role === "assistant") {
-                    updated[idx] = {
-                        ...target,
-                        content: target.content + token,
-                    };
+                    updated[idx] = { ...target, content: target.content + token };
                 }
                 return updated;
             });
-        });
 
-        const unsubNodeStart = on("node_start", (msg: WsMessage) => {
-            const node = msg.payload.node as string;
-            setActiveNode(node);
-        });
-
-        const unsubNodeEnd = on("node_end", (msg: WsMessage) => {
-            const node = msg.payload.node as string;
-            setCompletedNodes((prev) => {
-                const next = new Set(prev);
-                next.add(node);
-                return next;
-            });
-            setActiveNode(null);
-            if (node === "response_generator") {
-                setPipelineDone(true);
+            // 第一个 token：标记 response_generator 为 done，清空摘要
+            if (!firstTokenReceived.current) {
+                firstTokenReceived.current = true;
+                setPipelineNodes((prev) =>
+                    prev.map((n) =>
+                        n.node === "response_generator"
+                            ? { ...n, status: "done", summary: undefined }
+                            : n,
+                    ),
+                );
             }
         });
 
+        // ② 节点开始 → 记录时间 + 添加 active 节点
+        const unsubNodeStart = on("node_start", (msg: WsMessage) => {
+            const node = msg.payload.node as string;
+            const label = msg.payload.label as string;
+            activeTimestamps.current.set(node, Date.now());
+
+            setPipelineNodes((prev) => {
+                // 避免重复添加
+                if (prev.some((n) => n.node === node)) return prev;
+                return [...prev, { node, label, status: "active" }];
+            });
+        });
+
+        // ③ 节点结束 → 填充摘要 + 路由信息；非 response_generator 0.5s 最小可见
+        const unsubNodeEnd = on("node_end", (msg: WsMessage) => {
+            const node = msg.payload.node as string;
+            const label = msg.payload.label as string;
+            const summary = msg.payload.summary as string | undefined;
+            const tools = msg.payload.tools as string[] | undefined;
+            const grade = msg.payload.grade as string | undefined;
+            const fund_count = msg.payload.fund_count as number | undefined;
+            const route = msg.payload.route as string | undefined;
+            const nextNode = msg.payload.next_node as string | undefined;
+            const reasoning = msg.payload.reasoning as string | undefined;
+
+            // 填充摘要/路由/推理数据（保持 active 状态）
+            setPipelineNodes((prev) =>
+                prev.map((n) =>
+                    n.node === node
+                        ? { ...n, summary, tools, grade, fund_count, route, nextNode, reasoning }
+                        : n,
+                ),
+            );
+
+            // response_generator：不在 node_end 时切换 done，由 token 事件处理
+            if (node === "response_generator") return;
+
+            const activeAt = activeTimestamps.current.get(node) || Date.now();
+            const elapsed = Date.now() - activeAt;
+            const remaining = Math.max(0, MIN_NODE_VISIBLE_MS - elapsed);
+
+            const markDone = () => {
+                setPipelineNodes((prev) =>
+                    prev.map((n) =>
+                        n.node === node ? { ...n, status: "done" } : n,
+                    ),
+                );
+                doneTimers.current.delete(node);
+            };
+
+            if (remaining > 0) {
+                const existing = doneTimers.current.get(node);
+                if (existing) clearTimeout(existing);
+                doneTimers.current.set(node, setTimeout(markDone, remaining));
+            } else {
+                markDone();
+            }
+        });
+
+        // ④ 合规中断
         const unsubInterrupted = on("interrupted", (msg: WsMessage) => {
             setStreaming(false);
             setInterrupted(true);
@@ -100,23 +173,39 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
                 const idx = currentMsgIndexRef.current;
                 const target = updated[idx];
                 if (target && target.role === "assistant") {
-                    updated[idx] = {
-                        ...target,
-                        compliance: cr,
-                    };
+                    updated[idx] = { ...target, compliance: cr };
                 }
                 return updated;
             });
         });
 
+        // ⑤ 流结束
         const unsubDone = on("done", () => {
             setStreaming(false);
-            setActiveNode(null);
+            // 把流程节点固化为当前消息的一部分
+            setMessages((prev) => {
+                const updated = [...prev];
+                const idx = currentMsgIndexRef.current;
+                const target = updated[idx];
+                if (target && target.role === "assistant") {
+                    updated[idx] = {
+                        ...target,
+                        pipelineNodes: pipelineNodesRef.current.filter((n) => n.status === "done"),
+                    };
+                }
+                return updated;
+            });
+            setPipelineNodes([]);
+            activeTimestamps.current.clear();
+            firstTokenReceived.current = false;
         });
 
+        // ⑥ 错误
         const unsubError = on("error", (msg: WsMessage) => {
             setStreaming(false);
-            setActiveNode(null);
+            setPipelineNodes([]);
+            activeTimestamps.current.clear();
+            firstTokenReceived.current = false;
             const errMsg = (msg.payload.message as string) || "未知错误";
             setMessages((prev) => {
                 const updated = [...prev];
@@ -157,15 +246,16 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
             };
 
             setMessages((prev) => {
-                currentMsgIndexRef.current = prev.length + 1; // user message at len, assistant at len+1
+                currentMsgIndexRef.current = prev.length + 1;
                 return [...prev, userMsg, assistantMsg];
             });
             setStreaming(true);
             setInterrupted(false);
-            setHasFirstToken(false);
-            setActiveNode(null);
-            setCompletedNodes(new Set());
-            setPipelineDone(false);
+            setPipelineNodes([]);
+            activeTimestamps.current.clear();
+            firstTokenReceived.current = false;
+            doneTimers.current.forEach((t) => clearTimeout(t));
+            doneTimers.current.clear();
 
             send(buildChatMessage(text, sessionId));
         },
@@ -203,86 +293,68 @@ const ChatPanel: React.FC<ChatPanelProps> = ({ activeSession }) => {
                     </div>
                 )}
 
-                {messages.map((msg, i) => (
-                    <div key={i}>
-                        {/* 管道：在最后一条 assistant 消息上方，只要管道没结束就一直显示 */}
-                        {streaming && !pipelineDone && !interrupted && i === messages.length - 1 && msg.role === "assistant" && (
-                            <ThinkingPipeline activeNode={activeNode} completedNodes={completedNodes} />
-                        )}
-                        <ChatBubble
-                            role={msg.role}
-                            content={msg.content || (streaming && i === messages.length - 1 ? "▊" : "")}
-                            timestamp={msg.timestamp}
-                        />
-                        {/* 流式中已输出 token → 显示状态条 */}
-                        {streaming && hasFirstToken && !pipelineDone && !interrupted && i === messages.length - 1 && msg.role === "assistant" && (
-                            <div style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                                marginTop: 8,
-                                paddingLeft: 60,
-                            }}>
-                                <span style={{ fontSize: 11, color: "#1677ff", fontWeight: 500 }}>
-                                    ⚙️ 正在生成回复
-                                </span>
-                                <span style={{
-                                    display: "inline-block",
-                                    width: 6,
-                                    height: 6,
-                                    borderRadius: "50%",
-                                    background: "#1677ff",
-                                    animation: "typingDot 1s ease-in-out infinite",
-                                }} />
-                            </div>
-                        )}
-                        {msg.compliance && (
-                            <ApprovalPanel
-                                sessionId={sessionId}
-                                compliance={msg.compliance}
-                                onResolved={(action: "approve" | "reject") => {
-                                    setInterrupted(false);
-                                    setStreaming(true);
-                                    // 清空当前助手消息内容，等待 WebSocket 新 token 流
-                                    setMessages((prev) => {
-                                        const updated = [...prev];
-                                        const last = updated[updated.length - 1];
-                                        if (last.role === "assistant") {
-                                            updated[updated.length - 1] = {
-                                                ...last,
-                                                content: "",
-                                                compliance: undefined,
-                                            };
-                                            currentMsgIndexRef.current = updated.length - 1;
-                                        }
-                                        return updated;
-                                    });
-                                    // 通过 WebSocket 发送审批决定
-                                    handleApprovalResolved(action);
-                                }}
-                            />
-                        )}
-                    </div>
-                ))}
+                {messages.map((msg, i) => {
+                    const isLast = i === messages.length - 1;
+                    const isLastAssistant = isLast && msg.role === "assistant";
 
-                {/* 管道：刚发完消息（最后一条是 user）→ 在底部显示 */}
-                {streaming && !pipelineDone && !interrupted && messages.length > 0 && messages[messages.length - 1]?.role === "user" && (
-                    <ThinkingPipeline activeNode={activeNode} completedNodes={completedNodes} />
-                )}
+                    // 最后一条 assistant 且正在流式 → 显示实时 pipelineNodes
+                    // 否则显示消息固化的 pipelineNodes
+                    const showNodes =
+                        isLastAssistant && streaming
+                            ? pipelineNodes
+                            : msg.pipelineNodes || [];
+
+                    return (
+                        <div key={i}>
+                            {/* Agent 执行流程 → 在气泡上方 */}
+                            {showNodes.length > 0 && <AgentFlow nodes={showNodes} />}
+
+                            <ChatBubble
+                                role={msg.role}
+                                content={
+                                    msg.content ||
+                                    (isLastAssistant && streaming ? "思考中..." : "")
+                                }
+                                timestamp={msg.timestamp}
+                            />
+
+                            {/* 合规审批 */}
+                            {msg.compliance && (
+                                <ApprovalPanel
+                                    sessionId={sessionId}
+                                    compliance={msg.compliance}
+                                    onResolved={(action: "approve" | "reject") => {
+                                        setInterrupted(false);
+                                        setStreaming(true);
+                                        setPipelineNodes([]);
+                                        activeTimestamps.current.clear();
+                                        firstTokenReceived.current = false;
+                                        setMessages((prev) => {
+                                            const updated = [...prev];
+                                            const last = updated[updated.length - 1];
+                                            if (last.role === "assistant") {
+                                                updated[updated.length - 1] = {
+                                                    ...last,
+                                                    content: "",
+                                                    compliance: undefined,
+                                                };
+                                                currentMsgIndexRef.current = updated.length - 1;
+                                            }
+                                            return updated;
+                                        });
+                                        handleApprovalResolved(action);
+                                    }}
+                                />
+                            )}
+                        </div>
+                    );
+                })}
 
                 <div ref={bottomRef} />
             </div>
 
             {/* 输入区域 */}
             <ChatInput onSend={handleSend} disabled={streaming && !interrupted} />
-
-            {/* 动画定义 */}
-            <style>{`
-                @keyframes typingDot {
-                    0%, 100% { opacity: 0.3; transform: scale(0.8); }
-                    50% { opacity: 1; transform: scale(1.2); }
-                }
-            `}</style>
         </div>
     );
 };
